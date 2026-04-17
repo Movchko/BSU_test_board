@@ -19,6 +19,23 @@ static uint8_t ppky_h_adr;
 static uint8_t ppky_l_adr;
 static uint8_t ppky_zone;
 
+#define EMU_MCU_COUNT 6u
+
+typedef struct {
+    uint8_t zone;
+    uint8_t h_adr;
+    uint8_t d_type;
+} EmuMcuMap_t;
+
+static const EmuMcuMap_t emu_mcu_map[EMU_MCU_COUNT] = {
+    {1u, 1u, DEVICE_MCU_K1},
+    {2u, 2u, DEVICE_MCU_K1},
+    {3u, 3u, DEVICE_MCU_K1},
+    {1u, 4u, DEVICE_MCU_K2},
+    {2u, 5u, DEVICE_MCU_K3},
+    {3u, 6u, DEVICE_MCU_KR}
+};
+
 static void send_ppky_response(uint8_t cmd, const uint8_t *data, uint8_t len)
 {
     can_ext_id_t id;
@@ -55,12 +72,7 @@ static void fill_default_config(void)
     cfg->UId.UId4 = 1;
     cfg->UId.devId.zone   = 0;
     cfg->UId.devId.l_adr  = 0;
-    cfg->UId.devId.h_adr  = (uint8_t)(uid0 & 0xFF);
-    if (cfg->UId.devId.h_adr == 0) {
-        cfg->UId.devId.h_adr = (uint8_t)(uid1 & 0xFF);
-        if (cfg->UId.devId.h_adr == 0)
-            cfg->UId.devId.h_adr = 1;
-    }
+    cfg->UId.devId.h_adr  = 1; /* По ТЗ: ППКУ адрес 1 */
     cfg->UId.devId.d_type = DEVICE_PPKY_TYPE;
 
     cfg->beep = 1;
@@ -70,21 +82,7 @@ static void fill_default_config(void)
     strncpy((char *)cfg->zone_name[1], "Кондиционер", ZONE_NAME_SIZE - 1);
     strncpy((char *)cfg->zone_name[2], "Е-панель", ZONE_NAME_SIZE - 1);
 
-    /* Карта МКУ: 3 зоны × (1 MCU_TC + 2 MCU_IGN) = 9 устройств
-     * Зона 1: h=1,2,3
-     * Зона 2: h=4,5,6
-     * Зона 3: h=7,8,9
-     * В каждой зоне: сначала MCU_TC, затем два MCU_IGN.
-     */
-    const uint8_t zone_map[9]  = {1,1,1, 2,2,2, 3,3,3};
-    const uint8_t hadr_map[9]  = {1,2,3, 4,5,6, 7,8,9};
-    const uint8_t mcu_type[9]  = {
-        DEVICE_MCU_TC_TYPE, DEVICE_MCU_IGN_TYPE, DEVICE_MCU_IGN_TYPE,
-        DEVICE_MCU_TC_TYPE, DEVICE_MCU_IGN_TYPE, DEVICE_MCU_IGN_TYPE,
-        DEVICE_MCU_TC_TYPE, DEVICE_MCU_IGN_TYPE, DEVICE_MCU_IGN_TYPE
-    };
-
-    for (uint8_t i = 0; i < 9u; i++) {
+    for (uint8_t i = 0; i < EMU_MCU_COUNT; i++) {
         MKUCfg *m = &cfg->CfgDevices[i];
         memset(m, 0, sizeof(MKUCfg));
 
@@ -95,17 +93,17 @@ static void fill_default_config(void)
         m->UId.UId3 = uid0 ^ uid1 ^ uid2 ^ i;
         m->UId.UId4 = (uint32_t)(i + 1u);
 
-        m->UId.devId.zone  = zone_map[i] & 0x7Fu;
-        m->UId.devId.h_adr = hadr_map[i];
+        m->UId.devId.zone  = emu_mcu_map[i].zone & 0x7Fu;
+        m->UId.devId.h_adr = emu_mcu_map[i].h_adr;
         m->UId.devId.l_adr = 0;
-        m->UId.devId.d_type = mcu_type[i];
+        m->UId.devId.d_type = emu_mcu_map[i].d_type;
 
         /* Задержки зоны/модулей — параметры для боевой прошивки (в секундах) */
-        if (zone_map[i] == 1)
+        if (emu_mcu_map[i].zone == 1)
             m->zone_delay = 5;   /* 5 с */
-        else if (zone_map[i] == 2)
+        else if (emu_mcu_map[i].zone == 2)
             m->zone_delay = 10;  /* 10 с */
-        else if (zone_map[i] == 3)
+        else if (emu_mcu_map[i].zone == 3)
             m->zone_delay = 15;  /* 15 с */
         else
             m->zone_delay = 0;
@@ -115,27 +113,97 @@ static void fill_default_config(void)
         }
         m->module_delay[0] = 30;  /* delay для первого модуля, 30 с */
 
-        /* Один виртуальный модуль на МКУ: либо Igniter, либо DPT */
-        if (mcu_type[i] == DEVICE_MCU_IGN_TYPE) {
-            m->VDtype[0] = DEVICE_IGNITER_TYPE;
-            m->Devices[0].type = DEVICE_IGNITER_TYPE;
-            DeviceIgniterConfig *ign = (DeviceIgniterConfig *)m->Devices[0].reserv;
-            memset(ign, 0, sizeof(DeviceIgniterConfig));
-            ign->disable_sc_check   = 0;
-            ign->threshold_break_low  = 1000;  /* мВ */
-            ign->threshold_break_high = 3000;  /* мВ */
-            ign->burn_retry_count   = 1;
-        } else if (mcu_type[i] == DEVICE_MCU_TC_TYPE) {
+        if (emu_mcu_map[i].d_type == DEVICE_MCU_K1) {
+            /* K1: l1=DPT, l2=IGN, l3=IGN */
             m->VDtype[0] = DEVICE_DPT_TYPE;
-            m->Devices[0].type = DEVICE_DPT_TYPE;
             DeviceDPTConfig *dpt = (DeviceDPTConfig *)m->Devices[0].reserv;
             memset(dpt, 0, sizeof(DeviceDPTConfig));
-            dpt->mode                 = 0;   /* ДПТ */
-            dpt->use_max              = 1;   /* использовать MAX */
-            dpt->max_fire_threshold_c = 60;  /* °C */
+            dpt->mode = 0;
+            dpt->use_max = 1;
+            dpt->max_fire_threshold_c = 60;
             dpt->state_change_delay_ms = 100;
+
+            m->VDtype[1] = DEVICE_IGNITER_TYPE;
+            DeviceIgniterConfig *ign1 = (DeviceIgniterConfig *)m->Devices[1].reserv;
+            memset(ign1, 0, sizeof(DeviceIgniterConfig));
+            ign1->disable_sc_check = 1;
+            ign1->threshold_break_low = 1000;
+            ign1->threshold_break_high = 3000;
+            ign1->burn_retry_count = 0;
+
+            m->VDtype[2] = DEVICE_IGNITER_TYPE;
+            DeviceIgniterConfig *ign2 = (DeviceIgniterConfig *)m->Devices[2].reserv;
+            memset(ign2, 0, sizeof(DeviceIgniterConfig));
+            ign2->disable_sc_check = 1;
+            ign2->threshold_break_low = 1000;
+            ign2->threshold_break_high = 3000;
+            ign2->burn_retry_count = 0;
+        } else if (emu_mcu_map[i].d_type == DEVICE_MCU_K2) {
+            /* K2: l1=IGN, l2=IGN, l3=IGN */
+            for (uint8_t s = 0; s < 3u; s++) {
+                m->VDtype[s] = DEVICE_IGNITER_TYPE;
+                DeviceIgniterConfig *ign = (DeviceIgniterConfig *)m->Devices[s].reserv;
+                memset(ign, 0, sizeof(DeviceIgniterConfig));
+                ign->disable_sc_check = 1;
+                ign->threshold_break_low = 1000;
+                ign->threshold_break_high = 3000;
+                ign->burn_retry_count = 0;
+            }
+        } else if (emu_mcu_map[i].d_type == DEVICE_MCU_K3) {
+            /* K3: l1=LSWITCH, l2=LSWITCH, l3=IGN */
+            m->VDtype[0] = DEVICE_LSWITCH_TYPE;
+            DeviceDPTConfig *lsw1 = (DeviceDPTConfig *)m->Devices[0].reserv;
+            memset(lsw1, 0, sizeof(DeviceDPTConfig));
+            lsw1->mode = 1;
+            lsw1->use_max = 0;
+            lsw1->max_fire_threshold_c = 60;
+            lsw1->state_change_delay_ms = 100;
+
+            m->VDtype[1] = DEVICE_LSWITCH_TYPE;
+            DeviceDPTConfig *lsw2 = (DeviceDPTConfig *)m->Devices[1].reserv;
+            memset(lsw2, 0, sizeof(DeviceDPTConfig));
+            lsw2->mode = 1;
+            lsw2->use_max = 0;
+            lsw2->max_fire_threshold_c = 60;
+            lsw2->state_change_delay_ms = 100;
+
+            m->VDtype[2] = DEVICE_IGNITER_TYPE;
+            DeviceIgniterConfig *ign = (DeviceIgniterConfig *)m->Devices[2].reserv;
+            memset(ign, 0, sizeof(DeviceIgniterConfig));
+            ign->disable_sc_check = 1;
+            ign->threshold_break_low = 1000;
+            ign->threshold_break_high = 3000;
+            ign->burn_retry_count = 0;
+        } else if (emu_mcu_map[i].d_type == DEVICE_MCU_KR) {
+            /* KR: l1=RELAY, l2=RELAY */
+            m->VDtype[0] = DEVICE_RELAY_TYPE;
+            DeviceRelayConfig *r1 = (DeviceRelayConfig *)m->Devices[0].reserv;
+            memset(r1, 0, sizeof(DeviceRelayConfig));
+            r1->initial_state = 0;
+            r1->feedback_inverted = 0;
+            r1->settle_time_ms = 100;
+
+            m->VDtype[1] = DEVICE_RELAY_TYPE;
+            DeviceRelayConfig *r2 = (DeviceRelayConfig *)m->Devices[1].reserv;
+            memset(r2, 0, sizeof(DeviceRelayConfig));
+            r2->initial_state = 0;
+            r2->feedback_inverted = 0;
+            r2->settle_time_ms = 100;
         }
     }
+}
+
+static int find_cfg_device_index_by_hadr(uint8_t h_adr)
+{
+    PPKYCfg *cfg = (PPKYCfg *)LocalConfig;
+    for (uint8_t i = 0; i < 32u; i++) {
+        if (cfg->CfgDevices[i].UId.devId.h_adr == h_adr &&
+            cfg->CfgDevices[i].UId.devId.l_adr == 0 &&
+            cfg->CfgDevices[i].UId.devId.d_type != 0u) {
+            return (int)i;
+        }
+    }
+    return -1;
 }
 
 static void config_service_cmd(uint8_t cmd, const uint8_t *msg_data)
@@ -210,34 +278,44 @@ static void config_service_cmd(uint8_t cmd, const uint8_t *msg_data)
 
 static void handle_igniter_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, const uint8_t *payload, uint8_t len)
 {
-    /* В эмуляторе 6 igniter'ов на 6 MCU_IGN (см. bsu_emulator.c),
-     * здесь для примера обрабатываем только первые два, как было. */
-    uint8_t idx;
-    if (h_adr == 1) idx = 0;
-    else if (h_adr == 2) idx = 1;
-    else return;
-    if (l_adr != 1) return;
+    if (l_adr == 0u)
+        return;
+
+    int cfg_idx = find_cfg_device_index_by_hadr(h_adr);
+    if (cfg_idx < 0)
+        return;
 
     PPKYCfg *cfg = (PPKYCfg *)LocalConfig;
-    DeviceIgniterConfig *ic = (DeviceIgniterConfig *)cfg->CfgDevices[idx].Devices[0].reserv;
+    MKUCfg *m = &cfg->CfgDevices[cfg_idx];
+    uint8_t slot = (uint8_t)(l_adr - 1u);
+    if (slot >= NUM_DEV_IN_MCU || m->VDtype[slot] != DEVICE_IGNITER_TYPE)
+        return;
+
+    DeviceIgniterConfig *ic = (DeviceIgniterConfig *)m->Devices[slot].reserv;
 
     switch (cmd) {
-    case 0: break;
-    case 1:
-        /* В новом DeviceIgniterConfig нет поля start_duration_ms,
-         * поэтому просто обновляем disable_sc_check и передаём
-         * какое‑то фиксированное "duration" в эмулятор. */
+    case 11: /* VDeviceIgniter::CommandCB -> disable_sc_check */
+    case 1:  /* совместимость со старой командой */
         if (len >= 1) {
             ic->disable_sc_check = payload[0] ? 1 : 0;
-            BSU_Emulator_SetIgniterConfig(idx, ic->disable_sc_check, 1000);
+            BSU_Emulator_SetIgniterConfigByAddr(h_adr, l_adr, ic->disable_sc_check, 1000);
         }
         break;
-    case 2:
-        /* Раньше тут настраивалась start_duration_ms, сейчас игнорируем
-         * и просто транслируем disable_sc_check в эмулятор. */
+    case 12: /* пороги + retries (device_lib) */
+        if (len >= 5) {
+            uint16_t bl = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+            uint16_t bh = (uint16_t)payload[2] | ((uint16_t)payload[3] << 8);
+            if (bl > 0u)
+                ic->threshold_break_low = bl;
+            if (bh > 0u)
+                ic->threshold_break_high = bh;
+            ic->burn_retry_count = (payload[4] > 1u) ? 1u : payload[4];
+            BSU_Emulator_SetIgniterConfigByAddr(h_adr, l_adr, ic->disable_sc_check, 1000);
+        }
+        break;
+    case 2: /* legacy */
         if (len >= 2) {
-            (void)payload;
-            BSU_Emulator_SetIgniterConfig(idx, ic->disable_sc_check, 1000);
+            BSU_Emulator_SetIgniterConfigByAddr(h_adr, l_adr, ic->disable_sc_check, 1000);
         }
         break;
     default: break;
@@ -246,17 +324,26 @@ static void handle_igniter_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, co
 
 static void handle_dpt_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, const uint8_t *payload, uint8_t len)
 {
-    if (l_adr != 1) return;
+    if (l_adr == 0u)
+        return;
 
-    /* В новой схеме у нас 3 MCU_TC (h=1,4,7), по одному DPT в каждой зоне.
-     * Здесь для простоты считаем, что команды приходят на первый DPT
-     * (CfgDevices[2] в fill_default_config соответствует MCU_TC в зоне 1).
-     * При необходимости можно будет расширить по h_adr. */
+    int cfg_idx = find_cfg_device_index_by_hadr(h_adr);
+    if (cfg_idx < 0)
+        return;
+
     PPKYCfg *cfg = (PPKYCfg *)LocalConfig;
-    DeviceDPTConfig *dc = (DeviceDPTConfig *)cfg->CfgDevices[2].Devices[0].reserv;
+    MKUCfg *m = &cfg->CfgDevices[cfg_idx];
+    uint8_t slot = (uint8_t)(l_adr - 1u);
+    if (slot >= NUM_DEV_IN_MCU)
+        return;
+    if (m->VDtype[slot] != DEVICE_DPT_TYPE && m->VDtype[slot] != DEVICE_LSWITCH_TYPE)
+        return;
+
+    DeviceDPTConfig *dc = (DeviceDPTConfig *)m->Devices[slot].reserv;
 
     switch (cmd) {
-    case 2: /* Настройка порога пожара MAX в градусах */
+    case 12: /* Настройка порога MAX в градусах (device_lib) */
+    case 2:  /* legacy */
         if (len >= 2) {
             uint16_t v = payload[0] | ((uint16_t)payload[1] << 8);
             if (v > 0) {
@@ -264,12 +351,13 @@ static void handle_dpt_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, const 
             }
         }
         break;
-    case 3: /* Включить/выключить использование MAX */
+    case 3: /* legacy: use_max */
         if (len >= 1) {
             dc->use_max = payload[0] ? 1 : 0;
         }
         break;
-    case 4: /* Время фильтрации состояния линии, мс */
+    case 13: /* Время фильтрации состояния линии, мс (device_lib) */
+    case 4:  /* legacy */
         if (len >= 2) {
             uint16_t v = payload[0] | ((uint16_t)payload[1] << 8);
             if (v > 0) {
@@ -277,8 +365,44 @@ static void handle_dpt_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, const 
             }
         }
         break;
+    case 14: /* mode (для DPT/LSWITCH) */
+        if (len >= 1) {
+            dc->mode = payload[0];
+        }
+        break;
     default:
         break;
+    }
+
+    BSU_Emulator_SetDPTConfigByAddr(h_adr, l_adr, dc->state_change_delay_ms, dc->mode);
+}
+
+static void handle_relay_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, const uint8_t *payload, uint8_t len)
+{
+    if (l_adr == 0u)
+        return;
+
+    int cfg_idx = find_cfg_device_index_by_hadr(h_adr);
+    if (cfg_idx < 0)
+        return;
+
+    PPKYCfg *cfg = (PPKYCfg *)LocalConfig;
+    MKUCfg *m = &cfg->CfgDevices[cfg_idx];
+    uint8_t slot = (uint8_t)(l_adr - 1u);
+    if (slot >= NUM_DEV_IN_MCU || m->VDtype[slot] != DEVICE_RELAY_TYPE)
+        return;
+
+    DeviceRelayConfig *rc = (DeviceRelayConfig *)m->Devices[slot].reserv;
+
+    if (cmd == 10u) {
+        uint8_t desired = 0u;
+        if (len >= 1u && (payload[0] == 0u || payload[0] == 1u)) {
+            desired = payload[0];
+        } else {
+            desired = rc->initial_state ? 0u : 1u;
+        }
+        rc->initial_state = desired;
+        BSU_Emulator_SetRelayStateByAddr(h_adr, l_adr, desired);
     }
 }
 
@@ -315,12 +439,16 @@ void BSU_Backend_ProcessConfig(uint32_t can_id, const uint8_t *data, uint8_t len
         return;
     }
 
-    if (id.field.d_type == DEVICE_IGNITER_TYPE && (id.field.h_adr == 1 || id.field.h_adr == 2)) {
+    if (id.field.d_type == DEVICE_IGNITER_TYPE) {
         handle_igniter_command(id.field.h_adr, id.field.l_adr, cmd, payload, payload_len);
         return;
     }
-    if (id.field.d_type == DEVICE_DPT_TYPE && id.field.h_adr == 3) {
+    if (id.field.d_type == DEVICE_DPT_TYPE || id.field.d_type == DEVICE_LSWITCH_TYPE) {
         handle_dpt_command(id.field.h_adr, id.field.l_adr, cmd, payload, payload_len);
+        return;
+    }
+    if (id.field.d_type == DEVICE_RELAY_TYPE) {
+        handle_relay_command(id.field.h_adr, id.field.l_adr, cmd, payload, payload_len);
         return;
     }
 }
