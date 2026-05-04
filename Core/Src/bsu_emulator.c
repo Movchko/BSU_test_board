@@ -26,9 +26,11 @@ static uint8_t ppky_status_sec_cnt = 0;
 
 static can_ext_id_t mcu_can_id[MCU_COUNT];
 static uint32_t ppky_last_tick = 0;
+static uint32_t ppky_time_last_tick = 0;
 static uint32_t mcu_last_tick[MCU_COUNT] = {0};
 static uint32_t igniter_last_tick[IGNITER_COUNT] = {0};
 static uint32_t dpt_last_tick[DPT_COUNT] = {0};
+static uint32_t dpt_state_last_tick[DPT_COUNT] = {0};
 static uint32_t lswitch_last_tick[LSWITCH_COUNT] = {0};
 static uint32_t relay_last_tick[RELAY_COUNT] = {0};
 #define PPKY_INTERVAL_MS    1000
@@ -110,6 +112,93 @@ static can_ext_id_t relay_id[RELAY_COUNT];
 
 static volatile uint32_t emulator_pause_until = 0;
 
+typedef struct {
+    uint8_t hh_bcd;
+    uint8_t mm_bcd;
+    uint8_t ss_bcd;
+    uint8_t yy_bcd;
+    uint8_t mon_bcd;
+    uint8_t day_bcd;
+} PpkyTimeBcd_t;
+
+static PpkyTimeBcd_t ppky_time = {0x00u, 0x00u, 0x00u, 0x26u, 0x01u, 0x01u};
+
+static uint8_t bcd_to_bin(uint8_t bcd)
+{
+    return (uint8_t)(((bcd >> 4) * 10u) + (bcd & 0x0Fu));
+}
+
+static uint8_t bin_to_bcd(uint8_t bin)
+{
+    return (uint8_t)(((bin / 10u) << 4) | (bin % 10u));
+}
+
+static uint8_t days_in_month(uint8_t yy, uint8_t mon)
+{
+    static const uint8_t mdays[12] = {31u,28u,31u,30u,31u,30u,31u,31u,30u,31u,30u,31u};
+    uint8_t d;
+    uint8_t leap;
+    if (mon < 1u || mon > 12u) {
+        return 31u;
+    }
+    d = mdays[mon - 1u];
+    if (mon == 2u) {
+        leap = (uint8_t)((yy % 4u) == 0u ? 1u : 0u);
+        if (leap) {
+            d = 29u;
+        }
+    }
+    return d;
+}
+
+static void ppky_time_tick_1s(void)
+{
+    uint8_t hh = bcd_to_bin(ppky_time.hh_bcd);
+    uint8_t mm = bcd_to_bin(ppky_time.mm_bcd);
+    uint8_t ss = bcd_to_bin(ppky_time.ss_bcd);
+    uint8_t yy = bcd_to_bin(ppky_time.yy_bcd);
+    uint8_t mon = bcd_to_bin(ppky_time.mon_bcd);
+    uint8_t day = bcd_to_bin(ppky_time.day_bcd);
+    uint8_t dim;
+
+    if (mon < 1u || mon > 12u) {
+        mon = 1u;
+    }
+    if (day < 1u) {
+        day = 1u;
+    }
+
+    ss++;
+    if (ss >= 60u) {
+        ss = 0u;
+        mm++;
+        if (mm >= 60u) {
+            mm = 0u;
+            hh++;
+            if (hh >= 24u) {
+                hh = 0u;
+                day++;
+                dim = days_in_month(yy, mon);
+                if (day > dim) {
+                    day = 1u;
+                    mon++;
+                    if (mon > 12u) {
+                        mon = 1u;
+                        yy = (uint8_t)((yy + 1u) % 100u);
+                    }
+                }
+            }
+        }
+    }
+
+    ppky_time.hh_bcd = bin_to_bcd(hh);
+    ppky_time.mm_bcd = bin_to_bcd(mm);
+    ppky_time.ss_bcd = bin_to_bcd(ss);
+    ppky_time.yy_bcd = bin_to_bcd(yy);
+    ppky_time.mon_bcd = bin_to_bcd(mon);
+    ppky_time.day_bcd = bin_to_bcd(day);
+}
+
 void BSU_Emulator_PauseFor(uint32_t ms)
 {
     emulator_pause_until = HAL_GetTick() + ms;
@@ -152,6 +241,20 @@ static void send_ppky_packet(void)
     data[6] = 0;
     data[7] = 0;
 
+    BSU_Protocol_SendCan(ppky_can_id.ID, data, 8);
+}
+
+static void send_ppky_time_packet(void)
+{
+    uint8_t data[8] = {0};
+    data[0] = ServiceCmd_SetSystemTime;
+    data[1] = ppky_time.hh_bcd;
+    data[2] = ppky_time.mm_bcd;
+    data[3] = ppky_time.ss_bcd;
+    data[4] = ppky_time.yy_bcd;
+    data[5] = ppky_time.mon_bcd;
+    data[6] = ppky_time.day_bcd;
+    data[7] = 0;
     BSU_Protocol_SendCan(ppky_can_id.ID, data, 8);
 }
 
@@ -278,6 +381,7 @@ void BSU_Emulator_Init(void)
 
     build_ppky_id();
     ppky_last_tick = HAL_GetTick();
+    ppky_time_last_tick = HAL_GetTick();
     for (i = 0; i < MCU_COUNT; i++) {
         mcu_last_tick[i] = HAL_GetTick();
     }
@@ -286,6 +390,7 @@ void BSU_Emulator_Init(void)
     }
     for (i = 0; i < DPT_COUNT; i++) {
         dpt_last_tick[i] = HAL_GetTick();
+        dpt_state_last_tick[i] = HAL_GetTick();
     }
     for (i = 0; i < LSWITCH_COUNT; i++) {
         lswitch_last_tick[i] = HAL_GetTick();
@@ -447,6 +552,12 @@ void BSU_Emulator_Process(void)
         send_ppky_packet();
     }
 
+    if (now - ppky_time_last_tick >= 1000u) {
+        ppky_time_last_tick = now;
+        ppky_time_tick_1s();
+        send_ppky_time_packet();
+    }
+
     for (int i = 0; i < MCU_COUNT; i++) {
         if (now - mcu_last_tick[i] >= MCU_INTERVAL_MS) {
             mcu_last_tick[i] = now;
@@ -462,6 +573,10 @@ void BSU_Emulator_Process(void)
     }
 
     for (int i = 0; i < DPT_COUNT; i++) {
+        if (now - dpt_state_last_tick[i] >= 10000u) {
+            dpt_state_last_tick[i] = now;
+            vdev_dpt[i].line_state = (uint8_t)((vdev_dpt[i].line_state + 1u) & 0x03u);
+        }
         if (now - dpt_last_tick[i] >= DPT_INTERVAL_MS) {
             dpt_last_tick[i] = now;
             send_dpt_status(i);
@@ -509,4 +624,17 @@ void BSU_Emulator_SetRelayStateByAddr(uint8_t h_adr, uint8_t l_adr, uint8_t desi
         vdev_relay[idx].actual_state = vdev_relay[idx].desired_state;
         vdev_relay[idx].error_flag = 0u;
     }
+}
+
+void BSU_Emulator_SetSystemTimeBcd(const uint8_t *time_bcd_6)
+{
+    if (time_bcd_6 == NULL) {
+        return;
+    }
+    ppky_time.hh_bcd = time_bcd_6[0];
+    ppky_time.mm_bcd = time_bcd_6[1];
+    ppky_time.ss_bcd = time_bcd_6[2];
+    ppky_time.yy_bcd = time_bcd_6[3];
+    ppky_time.mon_bcd = time_bcd_6[4];
+    ppky_time.day_bcd = time_bcd_6[5];
 }

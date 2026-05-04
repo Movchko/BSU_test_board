@@ -19,6 +19,7 @@ void BSU_Emulator_PauseFor(uint32_t ms);
 void BSU_Emulator_SetIgniterConfigByAddr(uint8_t h_adr, uint8_t l_adr, uint8_t disable_sc_check, uint16_t start_duration_ms);
 void BSU_Emulator_SetDPTConfigByAddr(uint8_t h_adr, uint8_t l_adr, uint16_t speed, uint8_t direction);
 void BSU_Emulator_SetRelayStateByAddr(uint8_t h_adr, uint8_t l_adr, uint8_t desired_state);
+void BSU_Emulator_SetSystemTimeBcd(const uint8_t *time_bcd_6);
 
 #ifdef __cplusplus
 }

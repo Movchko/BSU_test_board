@@ -76,11 +76,19 @@ static void fill_default_config(void)
     cfg->UId.devId.d_type = DEVICE_PPKY_TYPE;
 
     cfg->beep = 1;
+    cfg->fire_mode = 0;
+    cfg->power_input = 0;
+    cfg->power_value = 24;
+    cfg->rs485_on = 0;
+    cfg->ex_can_on = 0;
+    cfg->ex_can_protocol = 0;
+    cfg->isBRP = 0;
 
     /* Имена зон */
     strncpy((char *)cfg->zone_name[0], "Моторный отсек", ZONE_NAME_SIZE - 1);
     strncpy((char *)cfg->zone_name[1], "Кондиционер", ZONE_NAME_SIZE - 1);
     strncpy((char *)cfg->zone_name[2], "Е-панель", ZONE_NAME_SIZE - 1);
+    cfg->fire_and[0] = 1; /* первая зона: режим И */
 
     for (uint8_t i = 0; i < EMU_MCU_COUNT; i++) {
         MKUCfg *m = &cfg->CfgDevices[i];
@@ -100,7 +108,7 @@ static void fill_default_config(void)
 
         /* Задержки зоны/модулей — параметры для боевой прошивки (в секундах) */
         if (emu_mcu_map[i].zone == 1)
-            m->zone_delay = 5;   /* 5 с */
+            m->zone_delay = 25;  /* по ТЗ для первой зоны */
         else if (emu_mcu_map[i].zone == 2)
             m->zone_delay = 10;  /* 10 с */
         else if (emu_mcu_map[i].zone == 3)
@@ -112,6 +120,8 @@ static void fill_default_config(void)
             m->module_delay[j] = 0;
         }
         m->module_delay[0] = 30;  /* delay для первого модуля, 30 с */
+        m->module_delay[1] = 35;  /* delay для первого модуля, 30 с */
+        m->module_delay[2] = 40;  /* delay для первого модуля, 30 с */
 
         if (emu_mcu_map[i].d_type == DEVICE_MCU_K1) {
             /* K1: l1=DPT, l2=IGN, l3=IGN */
@@ -158,6 +168,10 @@ static void fill_default_config(void)
             lsw1->use_max = 0;
             lsw1->max_fire_threshold_c = 60;
             lsw1->state_change_delay_ms = 100;
+            DeviceLimitSwitchConfig *lsc1 = (DeviceLimitSwitchConfig *)m->Devices[0].reserv;
+            lsc1->trigger_delay_s = 0;
+            lsc1->function = DeviceLimitSwitchFunction_SetFault;
+            lsc1->normal_closed = 0;
 
             m->VDtype[1] = DEVICE_LSWITCH_TYPE;
             DeviceDPTConfig *lsw2 = (DeviceDPTConfig *)m->Devices[1].reserv;
@@ -166,6 +180,10 @@ static void fill_default_config(void)
             lsw2->use_max = 0;
             lsw2->max_fire_threshold_c = 60;
             lsw2->state_change_delay_ms = 100;
+            DeviceLimitSwitchConfig *lsc2 = (DeviceLimitSwitchConfig *)m->Devices[1].reserv;
+            lsc2->trigger_delay_s = 0;
+            lsc2->function = DeviceLimitSwitchFunction_SetFault;
+            lsc2->normal_closed = 0;
 
             m->VDtype[2] = DEVICE_IGNITER_TYPE;
             DeviceIgniterConfig *ign = (DeviceIgniterConfig *)m->Devices[2].reserv;
@@ -180,14 +198,18 @@ static void fill_default_config(void)
             DeviceRelayConfig *r1 = (DeviceRelayConfig *)m->Devices[0].reserv;
             memset(r1, 0, sizeof(DeviceRelayConfig));
             r1->initial_state = 0;
+            r1->persist_state_enabled = 0;
             r1->feedback_inverted = 0;
+            r1->switch_delay_s = 0;
             r1->settle_time_ms = 100;
 
             m->VDtype[1] = DEVICE_RELAY_TYPE;
             DeviceRelayConfig *r2 = (DeviceRelayConfig *)m->Devices[1].reserv;
             memset(r2, 0, sizeof(DeviceRelayConfig));
             r2->initial_state = 0;
+            r2->persist_state_enabled = 0;
             r2->feedback_inverted = 0;
+            r2->switch_delay_s = 0;
             r2->settle_time_ms = 100;
         }
     }
@@ -433,6 +455,10 @@ void BSU_Backend_ProcessConfig(uint32_t can_id, const uint8_t *data, uint8_t len
         ppky_h_adr = id.field.h_adr;
         ppky_l_adr = id.field.l_adr;
         ppky_zone  = id.field.zone;
+        if (cmd == ServiceCmd_SetSystemTime && payload_len >= 6u) {
+            BSU_Emulator_SetSystemTimeBcd(payload);
+            return;
+        }
         if (cmd >= ServiceCmd_GetConfigSize && cmd <= ServiceCmd_DefaultConfig) {
             config_service_cmd(cmd, payload);
         }
