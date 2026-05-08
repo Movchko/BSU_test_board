@@ -98,6 +98,9 @@ int main(void)
   BSU_Emulator_Init();
 
   uint32_t led_tick = HAL_GetTick();
+  uint8_t vdev_tx_enabled = 1u;
+  GPIO_PinState btn_prev = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
+  uint32_t btn_last_change_ms = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -105,11 +108,26 @@ int main(void)
   while (1)
   {
     sendToCDC();
+
+    /* PC13: переключение "молчания" виртуальных устройств (кроме ППКУ). */
+    GPIO_PinState btn_now = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
+    uint32_t now = HAL_GetTick();
+    if ((btn_now != btn_prev) && ((now - btn_last_change_ms) >= 40u)) {
+      btn_last_change_ms = now;
+      btn_prev = btn_now;
+      if (btn_now == GPIO_PIN_RESET) { /* активный уровень кнопки на PC13 */
+        vdev_tx_enabled = (uint8_t)(vdev_tx_enabled ? 0u : 1u);
+        BSU_Emulator_SetVirtualDevicesTxEnabled(vdev_tx_enabled);
+      }
+    }
+
     BSU_Emulator_Process();
 
-    /* Мигание LED на PB2 раз в секунду */
-    uint32_t now = HAL_GetTick();
-    if (now - led_tick >= 1000) {
+    /* Индикация режима:
+     * - передача виртуальных устройств включена: 1 Гц
+     * - передача виртуальных устройств выключена: 5 Гц */
+    uint32_t led_period_ms = vdev_tx_enabled ? 1000u : 200u;
+    if (now - led_tick >= led_period_ms) {
       led_tick = now;
       HAL_GPIO_TogglePin(LED_GPIO_PORT, LED_GPIO_PIN);
     }
@@ -179,9 +197,16 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* LED на PB2 - мигание раз в секунду */

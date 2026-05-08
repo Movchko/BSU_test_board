@@ -11,13 +11,111 @@
 #include "device_config.h"
 
 #define PPKY_CONFIG_SIZE  sizeof(PPKYCfg)
+#define CFG_FLASH_BASE_ADDR  (0x08060000u)      /* последний сектор 128 КБ */
+#define CFG_FLASH_SECTOR     FLASH_SECTOR_7
+#define CFG_FLASH_BYTES      (128u * 1024u)
+#define CFG_FLASH_VERSION    1u
 
 static uint8_t LocalConfig[PPKY_CONFIG_SIZE];
-static uint8_t SavedConfig[PPKY_CONFIG_SIZE];
 
 static uint8_t ppky_h_adr;
 static uint8_t ppky_l_adr;
 static uint8_t ppky_zone;
+
+static const uint32_t cfg_payload_addr = CFG_FLASH_BASE_ADDR + sizeof(PPKYConfigHeader);
+/* SavedConfig физически лежит в flash начиная с cfg_payload_addr. */
+static const uint8_t * const SavedConfig = (const uint8_t *)cfg_payload_addr;
+
+static uint8_t cfg_flash_header_valid(const PPKYConfigHeader *hdr)
+{
+    if (hdr == NULL) {
+        return 0u;
+    }
+    if (hdr->magic != PPKY_CFG_HEADER_MAGIC) {
+        return 0u;
+    }
+    if (hdr->version != (uint16_t)CFG_FLASH_VERSION) {
+        return 0u;
+    }
+    if (hdr->size != (uint32_t)PPKY_CONFIG_SIZE) {
+        return 0u;
+    }
+    if ((sizeof(PPKYConfigHeader) + hdr->size) > CFG_FLASH_BYTES) {
+        return 0u;
+    }
+    return 1u;
+}
+
+static uint8_t cfg_flash_load_saved(uint8_t *dst)
+{
+    const PPKYConfigHeader *hdr = (const PPKYConfigHeader *)CFG_FLASH_BASE_ADDR;
+    if (!cfg_flash_header_valid(hdr)) {
+        return 0u;
+    }
+
+    memcpy(dst, (const void *)cfg_payload_addr, PPKY_CONFIG_SIZE);
+    return 1u;
+}
+
+static HAL_StatusTypeDef cfg_flash_program_bytes(uint32_t dst_addr, const uint8_t *src, uint32_t len)
+{
+    uint32_t i = 0u;
+    while (i < len) {
+        uint32_t w = 0xFFFFFFFFu;
+        uint8_t b0 = (i + 0u < len) ? src[i + 0u] : 0xFFu;
+        uint8_t b1 = (i + 1u < len) ? src[i + 1u] : 0xFFu;
+        uint8_t b2 = (i + 2u < len) ? src[i + 2u] : 0xFFu;
+        uint8_t b3 = (i + 3u < len) ? src[i + 3u] : 0xFFu;
+        w = (uint32_t)b0 | ((uint32_t)b1 << 8) | ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24);
+        if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, dst_addr + i, w) != HAL_OK) {
+            return HAL_ERROR;
+        }
+        i += 4u;
+    }
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef cfg_flash_store_local(void)
+{
+    HAL_StatusTypeDef st = HAL_OK;
+    PPKYConfigHeader hdr;
+    FLASH_EraseInitTypeDef er = {0};
+    uint32_t erase_err = 0u;
+
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic = PPKY_CFG_HEADER_MAGIC;
+    hdr.version = (uint16_t)CFG_FLASH_VERSION;
+    hdr.size = (uint32_t)PPKY_CONFIG_SIZE;
+
+    HAL_FLASH_Unlock();
+
+    er.TypeErase = FLASH_TYPEERASE_SECTORS;
+    er.Sector = CFG_FLASH_SECTOR;
+    er.NbSectors = 1u;
+    er.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+    if (HAL_FLASHEx_Erase(&er, &erase_err) != HAL_OK) {
+        st = HAL_ERROR;
+    }
+
+    if (st == HAL_OK) {
+        st = cfg_flash_program_bytes(CFG_FLASH_BASE_ADDR, (const uint8_t *)&hdr, (uint32_t)sizeof(hdr));
+    }
+    if (st == HAL_OK) {
+        st = cfg_flash_program_bytes(cfg_payload_addr, LocalConfig, (uint32_t)PPKY_CONFIG_SIZE);
+    }
+
+    HAL_FLASH_Lock();
+    return st;
+}
+
+static uint32_t cfg_flash_saved_crc(void)
+{
+    const PPKYConfigHeader *hdr = (const PPKYConfigHeader *)CFG_FLASH_BASE_ADDR;
+    if (!cfg_flash_header_valid(hdr)) {
+        return crc32(0, LocalConfig, (uint32_t)PPKY_CONFIG_SIZE);
+    }
+    return crc32(0, SavedConfig, hdr->size);
+}
 
 #define EMU_MCU_COUNT 6u
 
@@ -120,8 +218,6 @@ static void fill_default_config(void)
             m->module_delay[j] = 0;
         }
         m->module_delay[0] = 30;  /* delay для первого модуля, 30 с */
-        m->module_delay[1] = 35;  /* delay для первого модуля, 30 с */
-        m->module_delay[2] = 40;  /* delay для первого модуля, 30 с */
 
         if (emu_mcu_map[i].d_type == DEVICE_MCU_K1) {
             /* K1: l1=DPT, l2=IGN, l3=IGN */
@@ -248,7 +344,7 @@ static void config_service_cmd(uint8_t cmd, const uint8_t *msg_data)
     case ServiceCmd_GetConfigCRC: {
         uint32_t crc;
         if (msg_data[0] == 0)
-            crc = crc32(0, SavedConfig, BSU_GetConfigSize());
+            crc = cfg_flash_saved_crc();
         else
             crc = crc32(0, LocalConfig, BSU_GetConfigSize());
         data[0] = (crc >> 24) & 0xFF;
@@ -287,10 +383,13 @@ static void config_service_cmd(uint8_t cmd, const uint8_t *msg_data)
 
     case ServiceCmd_SaveConfig:
         BSU_SaveConfig();
+        send_ppky_response(cmd, data, 7);
         break;
 
-    case ServiceCmd_DefaultConfig:
-        BSU_DefaultConfig();
+    case ServiceCmd_StartSetConfig:
+        PPKYCfg *cfg = (PPKYCfg *)LocalConfig;
+        memset(cfg, 0, sizeof(PPKYCfg));
+        send_ppky_response(cmd, data, 7);
         break;
 
     default:
@@ -430,8 +529,12 @@ static void handle_relay_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, cons
 
 void BSU_Backend_Init(void)
 {
-    fill_default_config();
-    memcpy(SavedConfig, LocalConfig, PPKY_CONFIG_SIZE);
+    if (cfg_flash_load_saved(LocalConfig)) {
+        /* валидная сохраненная копия уже загружена в LocalConfig */
+    } else {
+        fill_default_config();
+        (void)cfg_flash_store_local();
+    }
 
     PPKYCfg *cfg = (PPKYCfg *)LocalConfig;
     ppky_h_adr = cfg->UId.devId.h_adr;
@@ -459,7 +562,7 @@ void BSU_Backend_ProcessConfig(uint32_t can_id, const uint8_t *data, uint8_t len
             BSU_Emulator_SetSystemTimeBcd(payload);
             return;
         }
-        if (cmd >= ServiceCmd_GetConfigSize && cmd <= ServiceCmd_DefaultConfig) {
+        if (cmd >= ServiceCmd_GetConfigSize && cmd <= ServiceCmd_StartSetConfig) {
             config_service_cmd(cmd, payload);
         }
         return;
@@ -508,7 +611,7 @@ void BSU_SetConfigWord(uint16_t num_word, uint32_t word)
 
 void BSU_SaveConfig(void)
 {
-    memcpy(SavedConfig, LocalConfig, PPKY_CONFIG_SIZE);
+    (void)cfg_flash_store_local();
 }
 
 void BSU_DefaultConfig(void)

@@ -109,6 +109,7 @@ static can_ext_id_t igniter_id[IGNITER_COUNT];
 static can_ext_id_t dpt_id[DPT_COUNT];
 static can_ext_id_t lswitch_id[LSWITCH_COUNT];
 static can_ext_id_t relay_id[RELAY_COUNT];
+static uint8_t virtual_devices_tx_enabled = 1u;
 
 static volatile uint32_t emulator_pause_until = 0;
 
@@ -558,6 +559,17 @@ void BSU_Emulator_Process(void)
         send_ppky_time_packet();
     }
 
+    for (int i = 0; i < DPT_COUNT; i++) {
+        if (now - dpt_state_last_tick[i] >= 10000u) {
+            dpt_state_last_tick[i] = now;
+            vdev_dpt[i].line_state = (uint8_t)((vdev_dpt[i].line_state + 1u) & 0x03u);
+        }
+    }
+
+    if (!virtual_devices_tx_enabled) {
+        return; /* ППКУ продолжает отправлять статус/время, МКУ и виртуалки молчат */
+    }
+
     for (int i = 0; i < MCU_COUNT; i++) {
         if (now - mcu_last_tick[i] >= MCU_INTERVAL_MS) {
             mcu_last_tick[i] = now;
@@ -573,10 +585,6 @@ void BSU_Emulator_Process(void)
     }
 
     for (int i = 0; i < DPT_COUNT; i++) {
-        if (now - dpt_state_last_tick[i] >= 10000u) {
-            dpt_state_last_tick[i] = now;
-            vdev_dpt[i].line_state = (uint8_t)((vdev_dpt[i].line_state + 1u) & 0x03u);
-        }
         if (now - dpt_last_tick[i] >= DPT_INTERVAL_MS) {
             dpt_last_tick[i] = now;
             send_dpt_status(i);
@@ -637,4 +645,9 @@ void BSU_Emulator_SetSystemTimeBcd(const uint8_t *time_bcd_6)
     ppky_time.yy_bcd = time_bcd_6[3];
     ppky_time.mon_bcd = time_bcd_6[4];
     ppky_time.day_bcd = time_bcd_6[5];
+}
+
+void BSU_Emulator_SetVirtualDevicesTxEnabled(uint8_t enabled)
+{
+    virtual_devices_tx_enabled = enabled ? 1u : 0u;
 }
