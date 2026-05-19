@@ -13,6 +13,7 @@
 #include "bsu_protocol.h"
 #include "bsu_backend.h"
 #include "main.h"
+#include "device_config.h"
 #include <string.h>
 
 static can_ext_id_t ppky_can_id;
@@ -109,7 +110,16 @@ static can_ext_id_t igniter_id[IGNITER_COUNT];
 static can_ext_id_t dpt_id[DPT_COUNT];
 static can_ext_id_t lswitch_id[LSWITCH_COUNT];
 static can_ext_id_t relay_id[RELAY_COUNT];
-static uint8_t virtual_devices_tx_enabled = 1u;
+/* online_mode:
+ * 1 - все устройства онлайн
+ * 2 - онлайн только ППКУ
+ * 3 - ППКУ + половина МКУ (два K1 и KR) */
+static uint8_t online_mode = 1u;
+static uint8_t mcu_active[MCU_COUNT] = {0};
+static uint8_t igniter_used_count = 0u;
+static uint8_t dpt_used_count = 0u;
+static uint8_t lswitch_used_count = 0u;
+static uint8_t relay_used_count = 0u;
 
 static volatile uint32_t emulator_pause_until = 0;
 
@@ -372,6 +382,138 @@ static int find_vdev_by_addr(const can_ext_id_t *ids, uint8_t count, uint8_t h_a
     return -1;
 }
 
+static int find_mcu_index_by_hadr(uint8_t h_adr)
+{
+    for (int i = 0; i < MCU_COUNT; i++) {
+        if (mcu_active[i] && mcu_can_id[i].field.h_adr == h_adr) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static uint8_t mcu_allowed_by_mode3(int idx)
+{
+    uint8_t k1_seen = 0u;
+    if (idx < 0 || idx >= MCU_COUNT || !mcu_active[idx]) {
+        return 0u;
+    }
+    if (mcu_can_id[idx].field.d_type == DEVICE_MCU_KR) {
+        return 1u;
+    }
+    if (mcu_can_id[idx].field.d_type != DEVICE_MCU_K1) {
+        return 0u;
+    }
+    for (int i = 0; i <= idx; i++) {
+        if (mcu_active[i] && mcu_can_id[i].field.d_type == DEVICE_MCU_K1) {
+            k1_seen++;
+            if (k1_seen >= 2u && i == idx) {
+                return 1u;
+            }
+        }
+    }
+    return (k1_seen <= 2u) ? 1u : 0u;
+}
+
+static uint8_t mcu_is_online(int idx)
+{
+    if (idx < 0 || idx >= MCU_COUNT || !mcu_active[idx]) {
+        return 0u;
+    }
+    if (online_mode == 1u) {
+        return 1u;
+    }
+    if (online_mode == 2u) {
+        return 0u;
+    }
+    return mcu_allowed_by_mode3(idx);
+}
+
+static uint8_t vdev_is_online_for_hadr(uint8_t h_adr)
+{
+    int mcu_idx = find_mcu_index_by_hadr(h_adr);
+    return mcu_is_online(mcu_idx);
+}
+
+void BSU_Emulator_ApplyConfig(const uint8_t *cfg_data, uint32_t cfg_size)
+{
+    uint8_t i;
+    uint8_t ign_idx = 0u;
+    uint8_t dpt_idx = 0u;
+    uint8_t lsw_idx = 0u;
+    uint8_t rel_idx = 0u;
+    const PPKYCfg *cfg = NULL;
+
+    if (cfg_data == NULL || cfg_size < sizeof(PPKYCfg)) {
+        return;
+    }
+    cfg = (const PPKYCfg *)cfg_data;
+
+    memset(mcu_active, 0, sizeof(mcu_active));
+    memset(igniter_id, 0, sizeof(igniter_id));
+    memset(dpt_id, 0, sizeof(dpt_id));
+    memset(lswitch_id, 0, sizeof(lswitch_id));
+    memset(relay_id, 0, sizeof(relay_id));
+
+    for (i = 0u; i < MCU_COUNT; i++) {
+        const MKUCfg *m = &cfg->CfgDevices[i];
+        const uint8_t zone = (uint8_t)(m->UId.devId.zone & 0x7Fu);
+        const uint8_t h_adr = m->UId.devId.h_adr;
+        const uint8_t d_type = m->UId.devId.d_type;
+
+        mcu_can_id[i].field.dir = 0;
+        mcu_can_id[i].field.zone = zone;
+        mcu_can_id[i].field.l_adr = 0;
+        mcu_can_id[i].field.h_adr = h_adr;
+        mcu_can_id[i].field.d_type = d_type;
+
+        if (h_adr == 0u || d_type == 0u) {
+            continue;
+        }
+        mcu_active[i] = 1u;
+
+        for (uint8_t slot = 0u; slot < NUM_DEV_IN_MCU; slot++) {
+            const uint32_t vdtype = m->VDtype[slot];
+            const uint8_t l_adr = (uint8_t)(slot + 1u);
+
+            if (vdtype == DEVICE_IGNITER_TYPE && ign_idx < IGNITER_COUNT) {
+                igniter_id[ign_idx].field.dir = 0;
+                igniter_id[ign_idx].field.zone = zone;
+                igniter_id[ign_idx].field.h_adr = h_adr;
+                igniter_id[ign_idx].field.l_adr = l_adr;
+                igniter_id[ign_idx].field.d_type = DEVICE_IGNITER_TYPE;
+                ign_idx++;
+            } else if (vdtype == DEVICE_DPT_TYPE && dpt_idx < DPT_COUNT) {
+                dpt_id[dpt_idx].field.dir = 0;
+                dpt_id[dpt_idx].field.zone = zone;
+                dpt_id[dpt_idx].field.h_adr = h_adr;
+                dpt_id[dpt_idx].field.l_adr = l_adr;
+                dpt_id[dpt_idx].field.d_type = DEVICE_DPT_TYPE;
+                dpt_idx++;
+            } else if (vdtype == DEVICE_LSWITCH_TYPE && lsw_idx < LSWITCH_COUNT) {
+                lswitch_id[lsw_idx].field.dir = 0;
+                lswitch_id[lsw_idx].field.zone = zone;
+                lswitch_id[lsw_idx].field.h_adr = h_adr;
+                lswitch_id[lsw_idx].field.l_adr = l_adr;
+                lswitch_id[lsw_idx].field.d_type = DEVICE_LSWITCH_TYPE;
+                lsw_idx++;
+            } else if (vdtype == DEVICE_RELAY_TYPE && rel_idx < RELAY_COUNT) {
+                relay_id[rel_idx].field.dir = 0;
+                relay_id[rel_idx].field.zone = zone;
+                relay_id[rel_idx].field.h_adr = h_adr;
+                relay_id[rel_idx].field.l_adr = l_adr;
+                relay_id[rel_idx].field.d_type = DEVICE_RELAY_TYPE;
+                rel_idx++;
+            }
+        }
+    }
+
+    igniter_used_count = ign_idx;
+    dpt_used_count = dpt_idx;
+    lswitch_used_count = lsw_idx;
+    relay_used_count = rel_idx;
+}
+
 void BSU_Emulator_Init(void)
 {
     uint8_t i;
@@ -435,6 +577,7 @@ void BSU_Emulator_Init(void)
     }
 
     for (i = 0; i < MCU_COUNT; i++) {
+        mcu_active[i] = 1u;
         mcu_can_id[i].field.dir    = 0;
         mcu_can_id[i].field.zone   = mcu_map[i].zone;
         mcu_can_id[i].field.l_adr  = 0;
@@ -535,6 +678,10 @@ void BSU_Emulator_Init(void)
             }
         }
     }
+    igniter_used_count = IGNITER_COUNT;
+    dpt_used_count = DPT_COUNT;
+    lswitch_used_count = LSWITCH_COUNT;
+    relay_used_count = RELAY_COUNT;
 }
 
 void BSU_Emulator_Tick1ms(void)
@@ -566,40 +713,44 @@ void BSU_Emulator_Process(void)
         }
     }
 
-    if (!virtual_devices_tx_enabled) {
+    if (online_mode == 2u) {
         return; /* ППКУ продолжает отправлять статус/время, МКУ и виртуалки молчат */
     }
 
     for (int i = 0; i < MCU_COUNT; i++) {
-        if (now - mcu_last_tick[i] >= MCU_INTERVAL_MS) {
+        if (mcu_is_online(i) && (now - mcu_last_tick[i] >= MCU_INTERVAL_MS)) {
             mcu_last_tick[i] = now;
             send_mcu_packet(i);
         }
     }
 
-    for (int i = 0; i < IGNITER_COUNT; i++) {
-        if (now - igniter_last_tick[i] >= IGNITER_INTERVAL_MS) {
+    for (uint8_t i = 0; i < igniter_used_count; i++) {
+        if (vdev_is_online_for_hadr(igniter_id[i].field.h_adr) &&
+            (now - igniter_last_tick[i] >= IGNITER_INTERVAL_MS)) {
             igniter_last_tick[i] = now;
             send_igniter_status(i);
         }
     }
 
-    for (int i = 0; i < DPT_COUNT; i++) {
-        if (now - dpt_last_tick[i] >= DPT_INTERVAL_MS) {
+    for (uint8_t i = 0; i < dpt_used_count; i++) {
+        if (vdev_is_online_for_hadr(dpt_id[i].field.h_adr) &&
+            (now - dpt_last_tick[i] >= DPT_INTERVAL_MS)) {
             dpt_last_tick[i] = now;
             send_dpt_status(i);
         }
     }
 
-    for (int i = 0; i < LSWITCH_COUNT; i++) {
-        if (now - lswitch_last_tick[i] >= LSWITCH_INTERVAL_MS) {
+    for (uint8_t i = 0; i < lswitch_used_count; i++) {
+        if (vdev_is_online_for_hadr(lswitch_id[i].field.h_adr) &&
+            (now - lswitch_last_tick[i] >= LSWITCH_INTERVAL_MS)) {
             lswitch_last_tick[i] = now;
             send_lswitch_status(i);
         }
     }
 
-    for (int i = 0; i < RELAY_COUNT; i++) {
-        if (now - relay_last_tick[i] >= RELAY_INTERVAL_MS) {
+    for (uint8_t i = 0; i < relay_used_count; i++) {
+        if (vdev_is_online_for_hadr(relay_id[i].field.h_adr) &&
+            (now - relay_last_tick[i] >= RELAY_INTERVAL_MS)) {
             relay_last_tick[i] = now;
             send_relay_status(i);
         }
@@ -608,7 +759,7 @@ void BSU_Emulator_Process(void)
 
 void BSU_Emulator_SetIgniterConfigByAddr(uint8_t h_adr, uint8_t l_adr, uint8_t disable_sc_check, uint16_t start_duration_ms)
 {
-    int idx = find_vdev_by_addr(igniter_id, IGNITER_COUNT, h_adr, l_adr);
+    int idx = find_vdev_by_addr(igniter_id, igniter_used_count, h_adr, l_adr);
     if (idx >= 0) {
         vdev_igniter[idx].disable_sc_check = disable_sc_check;
         vdev_igniter[idx].start_duration_ms = start_duration_ms;
@@ -617,7 +768,7 @@ void BSU_Emulator_SetIgniterConfigByAddr(uint8_t h_adr, uint8_t l_adr, uint8_t d
 
 void BSU_Emulator_SetDPTConfigByAddr(uint8_t h_adr, uint8_t l_adr, uint16_t speed, uint8_t direction)
 {
-    int idx = find_vdev_by_addr(dpt_id, DPT_COUNT, h_adr, l_adr);
+    int idx = find_vdev_by_addr(dpt_id, dpt_used_count, h_adr, l_adr);
     if (idx >= 0) {
         vdev_dpt[idx].speed = speed;
         vdev_dpt[idx].direction = direction;
@@ -626,7 +777,7 @@ void BSU_Emulator_SetDPTConfigByAddr(uint8_t h_adr, uint8_t l_adr, uint16_t spee
 
 void BSU_Emulator_SetRelayStateByAddr(uint8_t h_adr, uint8_t l_adr, uint8_t desired_state)
 {
-    int idx = find_vdev_by_addr(relay_id, RELAY_COUNT, h_adr, l_adr);
+    int idx = find_vdev_by_addr(relay_id, relay_used_count, h_adr, l_adr);
     if (idx >= 0) {
         vdev_relay[idx].desired_state = desired_state ? 1u : 0u;
         vdev_relay[idx].actual_state = vdev_relay[idx].desired_state;
@@ -649,5 +800,13 @@ void BSU_Emulator_SetSystemTimeBcd(const uint8_t *time_bcd_6)
 
 void BSU_Emulator_SetVirtualDevicesTxEnabled(uint8_t enabled)
 {
-    virtual_devices_tx_enabled = enabled ? 1u : 0u;
+    online_mode = enabled ? 1u : 2u;
+}
+
+void BSU_Emulator_SetOnlineMode(uint8_t mode)
+{
+    if (mode < 1u || mode > 3u) {
+        mode = 1u;
+    }
+    online_mode = mode;
 }

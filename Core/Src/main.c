@@ -37,6 +37,8 @@
 /* USER CODE BEGIN PD */
 #define LED_GPIO_PORT  GPIOB
 #define LED_GPIO_PIN   GPIO_PIN_2
+/* Для этой платы кнопка на PC13 считается нажатой при уровне SET. */
+#define BTN_PRESSED_LEVEL GPIO_PIN_SET
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -96,11 +98,17 @@ int main(void)
   BSU_Backend_Init();
   BSU_Protocol_Init();
   BSU_Emulator_Init();
+  BSU_Emulator_ApplyConfig(BSU_Backend_GetLocalConfig(), BSU_GetConfigSize());
 
   uint32_t led_tick = HAL_GetTick();
-  uint8_t vdev_tx_enabled = 1u;
-  GPIO_PinState btn_prev = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
-  uint32_t btn_last_change_ms = HAL_GetTick();
+  uint8_t online_mode = 1u;
+  GPIO_PinState btn_raw_prev = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
+  GPIO_PinState btn_state = btn_raw_prev;
+  uint32_t btn_last_edge_ms = HAL_GetTick();
+  uint32_t btn_press_start_ms = 0u;
+  uint8_t long_press_done = 0u;
+  uint8_t confirm_toggle_left = 0u;
+  uint32_t confirm_tick = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -109,27 +117,71 @@ int main(void)
   {
     sendToCDC();
 
-    /* PC13: переключение "молчания" виртуальных устройств (кроме ППКУ). */
-    GPIO_PinState btn_now = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
     uint32_t now = HAL_GetTick();
-    if ((btn_now != btn_prev) && ((now - btn_last_change_ms) >= 40u)) {
-      btn_last_change_ms = now;
-      btn_prev = btn_now;
-      if (btn_now == GPIO_PIN_RESET) { /* активный уровень кнопки на PC13 */
-        vdev_tx_enabled = (uint8_t)(vdev_tx_enabled ? 0u : 1u);
-        BSU_Emulator_SetVirtualDevicesTxEnabled(vdev_tx_enabled);
+    GPIO_PinState btn_now = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
+
+    /* Debounce кнопки PC13 */
+    if (btn_now != btn_raw_prev) {
+      btn_raw_prev = btn_now;
+      btn_last_edge_ms = now;
+    }
+    if ((now - btn_last_edge_ms) >= 40u && btn_state != btn_raw_prev) {
+      btn_state = btn_raw_prev;
+      if (btn_state == BTN_PRESSED_LEVEL) { /* нажатие */
+        btn_press_start_ms = now;
+        long_press_done = 0u;
+      } else { /* отпускание */
+        if (!long_press_done) {
+          online_mode++;
+          if (online_mode > 3u) {
+            online_mode = 1u;
+          }
+          BSU_Emulator_SetOnlineMode(online_mode);
+        }
       }
+    }
+
+    /* Удержание 5 секунд: сброс к дефолту + сохранить + подтвердить 3 быстрыми миганиями */
+    if (btn_state == BTN_PRESSED_LEVEL && !long_press_done && (now - btn_press_start_ms) >= 5000u) {
+      long_press_done = 1u;
+      BSU_DefaultConfig();
+      BSU_SaveConfig();
+      online_mode = 1u;
+      BSU_Emulator_SetOnlineMode(online_mode);
+      confirm_toggle_left = 6u;          /* 3 мигания = 6 переключений */
+      confirm_tick = now;
+      HAL_GPIO_WritePin(LED_GPIO_PORT, LED_GPIO_PIN, GPIO_PIN_SET);
     }
 
     BSU_Emulator_Process();
 
-    /* Индикация режима:
-     * - передача виртуальных устройств включена: 1 Гц
-     * - передача виртуальных устройств выключена: 5 Гц */
-    uint32_t led_period_ms = vdev_tx_enabled ? 1000u : 200u;
-    if (now - led_tick >= led_period_ms) {
-      led_tick = now;
-      HAL_GPIO_TogglePin(LED_GPIO_PORT, LED_GPIO_PIN);
+    /* Индикация:
+     * - при удержании кнопки до срабатывания long-press: LED не мигает;
+     * - при успешном long-press: 3 быстрых мигания (период 0.3 с);
+     * - иначе обычный режим 1/5 Гц. */
+    if (confirm_toggle_left > 0u) {
+      if ((now - confirm_tick) >= 150u) { /* 150 ms on/off => период 300 ms */
+        confirm_tick = now;
+        HAL_GPIO_TogglePin(LED_GPIO_PORT, LED_GPIO_PIN);
+        confirm_toggle_left--;
+        if (confirm_toggle_left == 0u) {
+          led_tick = now;
+          HAL_GPIO_WritePin(LED_GPIO_PORT, LED_GPIO_PIN, GPIO_PIN_RESET);
+        }
+      }
+    } else if (btn_state == BTN_PRESSED_LEVEL) {
+      HAL_GPIO_WritePin(LED_GPIO_PORT, LED_GPIO_PIN, GPIO_PIN_RESET);
+    } else {
+      uint32_t led_period_ms = 1000u; /* mode 1: все онлайн */
+      if (online_mode == 2u) {
+        led_period_ms = 200u;  /* mode 2: только ППКУ */
+      } else if (online_mode == 3u) {
+        led_period_ms = 100u;  /* mode 3: ППКУ + 2*K1 + KR (самый быстрый) */
+      }
+      if (now - led_tick >= led_period_ms) {
+        led_tick = now;
+        HAL_GPIO_TogglePin(LED_GPIO_PORT, LED_GPIO_PIN);
+      }
     }
     /* USER CODE END WHILE */
 

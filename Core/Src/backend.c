@@ -117,6 +117,15 @@ static uint32_t cfg_flash_saved_crc(void)
     return crc32(0, SavedConfig, hdr->size);
 }
 
+static void backend_apply_runtime_cfg(void)
+{
+    PPKYCfg *cfg = (PPKYCfg *)LocalConfig;
+    ppky_h_adr = cfg->UId.devId.h_adr;
+    ppky_l_adr = cfg->UId.devId.l_adr;
+    ppky_zone  = cfg->UId.devId.zone;
+    BSU_Emulator_ApplyConfig(LocalConfig, (uint32_t)PPKY_CONFIG_SIZE);
+}
+
 #define EMU_MCU_COUNT 6u
 
 typedef struct {
@@ -535,11 +544,7 @@ void BSU_Backend_Init(void)
         fill_default_config();
         (void)cfg_flash_store_local();
     }
-
-    PPKYCfg *cfg = (PPKYCfg *)LocalConfig;
-    ppky_h_adr = cfg->UId.devId.h_adr;
-    ppky_l_adr = cfg->UId.devId.l_adr;
-    ppky_zone  = cfg->UId.devId.zone;
+    backend_apply_runtime_cfg();
 }
 
 void BSU_Backend_ProcessConfig(uint32_t can_id, const uint8_t *data, uint8_t len)
@@ -611,10 +616,17 @@ void BSU_SetConfigWord(uint16_t num_word, uint32_t word)
 
 void BSU_SaveConfig(void)
 {
-    (void)cfg_flash_store_local();
+    if (cfg_flash_store_local() == HAL_OK) {
+        backend_apply_runtime_cfg();
+    }
 }
 
 void BSU_DefaultConfig(void)
 {
     fill_default_config();
+}
+
+const uint8_t *BSU_Backend_GetLocalConfig(void)
+{
+    return LocalConfig;
 }

@@ -22,6 +22,7 @@ uint32_t BSU_GetConfigWord(uint16_t num_word);
 void BSU_SetConfigWord(uint16_t num_word, uint32_t word);
 void BSU_SaveConfig(void);
 void BSU_DefaultConfig(void);
+const uint8_t *BSU_Backend_GetLocalConfig(void);
 
 #ifdef __cplusplus
 }

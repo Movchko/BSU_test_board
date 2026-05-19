@@ -21,6 +21,8 @@ void BSU_Emulator_SetDPTConfigByAddr(uint8_t h_adr, uint8_t l_adr, uint16_t spee
 void BSU_Emulator_SetRelayStateByAddr(uint8_t h_adr, uint8_t l_adr, uint8_t desired_state);
 void BSU_Emulator_SetSystemTimeBcd(const uint8_t *time_bcd_6);
 void BSU_Emulator_SetVirtualDevicesTxEnabled(uint8_t enabled);
+void BSU_Emulator_SetOnlineMode(uint8_t mode);
+void BSU_Emulator_ApplyConfig(const uint8_t *cfg_data, uint32_t cfg_size);
 
 #ifdef __cplusplus
 }
