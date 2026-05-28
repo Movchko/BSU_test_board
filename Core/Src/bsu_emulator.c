@@ -113,7 +113,8 @@ static can_ext_id_t relay_id[RELAY_COUNT];
 /* online_mode:
  * 1 - все устройства онлайн
  * 2 - онлайн только ППКУ
- * 3 - ППКУ + половина МКУ (два K1 и KR) */
+ * 3 - ППКУ + половина МКУ (два K1 и KR)
+ * 4 - все МКУ онлайн, но без периодических пакетов ППКУ */
 static uint8_t online_mode = 1u;
 static uint8_t mcu_active[MCU_COUNT] = {0};
 static uint8_t igniter_used_count = 0u;
@@ -426,7 +427,15 @@ static uint8_t mcu_is_online(int idx)
     if (online_mode == 2u) {
         return 0u;
     }
-    return mcu_allowed_by_mode3(idx);
+    if (online_mode == 3u) {
+        return mcu_allowed_by_mode3(idx);
+    }
+    return 1u; /* mode 4: все МКУ онлайн */
+}
+
+static uint8_t ppky_is_online(void)
+{
+    return (online_mode == 4u) ? 0u : 1u;
 }
 
 static uint8_t vdev_is_online_for_hadr(uint8_t h_adr)
@@ -695,12 +704,12 @@ void BSU_Emulator_Process(void)
     if (now < emulator_pause_until)
         return;
 
-    if (now - ppky_last_tick >= PPKY_INTERVAL_MS) {
+    if (ppky_is_online() && (now - ppky_last_tick >= PPKY_INTERVAL_MS)) {
         ppky_last_tick = now;
         send_ppky_packet();
     }
 
-    if (now - ppky_time_last_tick >= 1000u) {
+    if (ppky_is_online() && (now - ppky_time_last_tick >= 1000u)) {
         ppky_time_last_tick = now;
         ppky_time_tick_1s();
         send_ppky_time_packet();
@@ -805,7 +814,7 @@ void BSU_Emulator_SetVirtualDevicesTxEnabled(uint8_t enabled)
 
 void BSU_Emulator_SetOnlineMode(uint8_t mode)
 {
-    if (mode < 1u || mode > 3u) {
+    if (mode < 1u || mode > 4u) {
         mode = 1u;
     }
     online_mode = mode;

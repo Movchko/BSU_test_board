@@ -133,7 +133,7 @@ int main(void)
       } else { /* отпускание */
         if (!long_press_done) {
           online_mode++;
-          if (online_mode > 3u) {
+          if (online_mode > 4u) {
             online_mode = 1u;
           }
           BSU_Emulator_SetOnlineMode(online_mode);
@@ -177,6 +177,8 @@ int main(void)
         led_period_ms = 200u;  /* mode 2: только ППКУ */
       } else if (online_mode == 3u) {
         led_period_ms = 100u;  /* mode 3: ППКУ + 2*K1 + KR (самый быстрый) */
+      } else if (online_mode == 4u) {
+        led_period_ms = 350u;  /* mode 4: МКУ онлайн, ППКУ молчит */
       }
       if (now - led_tick >= led_period_ms) {
         led_tick = now;
