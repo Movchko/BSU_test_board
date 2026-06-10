@@ -533,6 +533,19 @@ static void handle_relay_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, cons
         }
         rc->initial_state = desired;
         BSU_Emulator_SetRelayStateByAddr(h_adr, l_adr, desired);
+    } else if (cmd == 11u) {
+        if (len >= 1u) {
+            rc->mode = (payload[0] > 3u) ? 3u : payload[0];
+        }
+    } else if (cmd == 12u) {
+        if (len >= 1u) {
+            rc->initial_state = (payload[0] != 0u) ? 1u : 0u;
+            BSU_Emulator_SetRelayStateByAddr(h_adr, l_adr, rc->initial_state);
+        }
+    } else if (cmd == 13u) {
+        if (len >= 1u) {
+            rc->persist_state_enabled = (payload[0] != 0u) ? 1u : 0u;
+        }
     }
 }
 
