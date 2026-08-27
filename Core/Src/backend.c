@@ -14,7 +14,7 @@
 #define CFG_FLASH_BASE_ADDR  (0x08060000u)      /* последний сектор 128 КБ */
 #define CFG_FLASH_SECTOR     FLASH_SECTOR_7
 #define CFG_FLASH_BYTES      (128u * 1024u)
-#define CFG_FLASH_VERSION    1u
+#define CFG_FLASH_VERSION    2u
 
 static uint8_t LocalConfig[PPKY_CONFIG_SIZE];
 
@@ -126,7 +126,7 @@ static void backend_apply_runtime_cfg(void)
     BSU_Emulator_ApplyConfig(LocalConfig, (uint32_t)PPKY_CONFIG_SIZE);
 }
 
-#define EMU_MCU_COUNT 6u
+#define EMU_MCU_COUNT 7u
 
 typedef struct {
     uint8_t zone;
@@ -140,7 +140,8 @@ static const EmuMcuMap_t emu_mcu_map[EMU_MCU_COUNT] = {
     {3u, 3u, DEVICE_MCU_K1},
     {1u, 4u, DEVICE_MCU_K2},
     {2u, 5u, DEVICE_MCU_K3},
-    {3u, 6u, DEVICE_MCU_KR}
+    {3u, 6u, DEVICE_MCU_KR},
+    {3u, 7u, DEVICE_MCU_K3}
 };
 
 static void send_ppky_response(uint8_t cmd, const uint8_t *data, uint8_t len)
@@ -265,38 +266,71 @@ static void fill_default_config(void)
                 ign->burn_retry_count = 0;
             }
         } else if (emu_mcu_map[i].d_type == DEVICE_MCU_K3) {
-            /* K3: l1=LSWITCH, l2=LSWITCH, l3=IGN */
-            m->VDtype[0] = DEVICE_LSWITCH_TYPE;
-            DeviceDPTConfig *lsw1 = (DeviceDPTConfig *)m->Devices[0].reserv;
-            memset(lsw1, 0, sizeof(DeviceDPTConfig));
-            lsw1->mode = 1;
-            lsw1->use_max = 0;
-            lsw1->max_fire_threshold_c = 60;
-            lsw1->state_change_delay_ms = 100;
-            DeviceLimitSwitchConfig *lsc1 = (DeviceLimitSwitchConfig *)m->Devices[0].reserv;
-            lsc1->trigger_delay_s = 0;
-            lsc1->function = DeviceLimitSwitchFunction_SetFault;
-            lsc1->normal_closed = 0;
+            if (emu_mcu_map[i].h_adr == 7u) {
+                /* Дополнительный K3: l1=BUTTON, l2=LSWITCH, l3=IGN */
+                m->VDtype[0] = DEVICE_BUTTON_TYPE;
+                DeviceButtonConfig *btn = (DeviceButtonConfig *)m->Devices[0].reserv;
+                memset(btn, 0, sizeof(DeviceButtonConfig));
+                btn->mode = 2;
+                btn->use_max = 0;
+                btn->max_fire_threshold_c = 60;
+                btn->state_change_delay_ms = 100;
+                btn->button_kind = DeviceButtonKind_StartSP;
+                btn->normal_closed = 0;
 
-            m->VDtype[1] = DEVICE_LSWITCH_TYPE;
-            DeviceDPTConfig *lsw2 = (DeviceDPTConfig *)m->Devices[1].reserv;
-            memset(lsw2, 0, sizeof(DeviceDPTConfig));
-            lsw2->mode = 1;
-            lsw2->use_max = 0;
-            lsw2->max_fire_threshold_c = 60;
-            lsw2->state_change_delay_ms = 100;
-            DeviceLimitSwitchConfig *lsc2 = (DeviceLimitSwitchConfig *)m->Devices[1].reserv;
-            lsc2->trigger_delay_s = 0;
-            lsc2->function = DeviceLimitSwitchFunction_SetFault;
-            lsc2->normal_closed = 0;
+                m->VDtype[1] = DEVICE_LSWITCH_TYPE;
+                DeviceDPTConfig *lsw = (DeviceDPTConfig *)m->Devices[1].reserv;
+                memset(lsw, 0, sizeof(DeviceDPTConfig));
+                lsw->mode = 1;
+                lsw->use_max = 0;
+                lsw->max_fire_threshold_c = 60;
+                lsw->state_change_delay_ms = 100;
+                DeviceLimitSwitchConfig *lsc = (DeviceLimitSwitchConfig *)m->Devices[1].reserv;
+                lsc->trigger_delay_s = 0;
+                lsc->function = DeviceLimitSwitchFunction_SetFault;
+                lsc->normal_closed = 0;
 
-            m->VDtype[2] = DEVICE_IGNITER_TYPE;
-            DeviceIgniterConfig *ign = (DeviceIgniterConfig *)m->Devices[2].reserv;
-            memset(ign, 0, sizeof(DeviceIgniterConfig));
-            ign->disable_sc_check = 1;
-            ign->threshold_break_low = 1000;
-            ign->threshold_break_high = 3000;
-            ign->burn_retry_count = 0;
+                m->VDtype[2] = DEVICE_IGNITER_TYPE;
+                DeviceIgniterConfig *ign = (DeviceIgniterConfig *)m->Devices[2].reserv;
+                memset(ign, 0, sizeof(DeviceIgniterConfig));
+                ign->disable_sc_check = 1;
+                ign->threshold_break_low = 1000;
+                ign->threshold_break_high = 3000;
+                ign->burn_retry_count = 0;
+            } else {
+                /* Базовый K3: l1=LSWITCH, l2=LSWITCH, l3=IGN */
+                m->VDtype[0] = DEVICE_LSWITCH_TYPE;
+                DeviceDPTConfig *lsw1 = (DeviceDPTConfig *)m->Devices[0].reserv;
+                memset(lsw1, 0, sizeof(DeviceDPTConfig));
+                lsw1->mode = 1;
+                lsw1->use_max = 0;
+                lsw1->max_fire_threshold_c = 60;
+                lsw1->state_change_delay_ms = 100;
+                DeviceLimitSwitchConfig *lsc1 = (DeviceLimitSwitchConfig *)m->Devices[0].reserv;
+                lsc1->trigger_delay_s = 0;
+                lsc1->function = DeviceLimitSwitchFunction_SetFault;
+                lsc1->normal_closed = 0;
+
+                m->VDtype[1] = DEVICE_LSWITCH_TYPE;
+                DeviceDPTConfig *lsw2 = (DeviceDPTConfig *)m->Devices[1].reserv;
+                memset(lsw2, 0, sizeof(DeviceDPTConfig));
+                lsw2->mode = 1;
+                lsw2->use_max = 0;
+                lsw2->max_fire_threshold_c = 60;
+                lsw2->state_change_delay_ms = 100;
+                DeviceLimitSwitchConfig *lsc2 = (DeviceLimitSwitchConfig *)m->Devices[1].reserv;
+                lsc2->trigger_delay_s = 0;
+                lsc2->function = DeviceLimitSwitchFunction_SetFault;
+                lsc2->normal_closed = 0;
+
+                m->VDtype[2] = DEVICE_IGNITER_TYPE;
+                DeviceIgniterConfig *ign = (DeviceIgniterConfig *)m->Devices[2].reserv;
+                memset(ign, 0, sizeof(DeviceIgniterConfig));
+                ign->disable_sc_check = 1;
+                ign->threshold_break_low = 1000;
+                ign->threshold_break_high = 3000;
+                ign->burn_retry_count = 0;
+            }
         } else if (emu_mcu_map[i].d_type == DEVICE_MCU_KR) {
             /* KR: l1=RELAY, l2=RELAY */
             m->VDtype[0] = DEVICE_RELAY_TYPE;
@@ -393,6 +427,13 @@ static void config_service_cmd(uint8_t cmd, const uint8_t *msg_data)
     case ServiceCmd_SaveConfig:
         BSU_SaveConfig();
         send_ppky_response(cmd, data, 7);
+        /* Как ППКУ после APPLY на МКУ: подтверждение в ПО (cmd=168). */
+        {
+            uint8_t apply_done[7] = {0};
+            apply_done[0] = (uint8_t)EMU_MCU_COUNT; /* ok_count */
+            apply_done[1] = (uint8_t)EMU_MCU_COUNT; /* target_count */
+            send_ppky_response(ServiceCmd_ApplyConfigDone, apply_done, 7);
+        }
         break;
 
     case ServiceCmd_StartSetConfig:
@@ -466,10 +507,13 @@ static void handle_dpt_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, const 
     uint8_t slot = (uint8_t)(l_adr - 1u);
     if (slot >= NUM_DEV_IN_MCU)
         return;
-    if (m->VDtype[slot] != DEVICE_DPT_TYPE && m->VDtype[slot] != DEVICE_LSWITCH_TYPE)
+    if (m->VDtype[slot] != DEVICE_DPT_TYPE &&
+        m->VDtype[slot] != DEVICE_LSWITCH_TYPE &&
+        m->VDtype[slot] != DEVICE_BUTTON_TYPE)
         return;
 
     DeviceDPTConfig *dc = (DeviceDPTConfig *)m->Devices[slot].reserv;
+    DeviceButtonConfig *bc = (DeviceButtonConfig *)m->Devices[slot].reserv;
 
     switch (cmd) {
     case 12: /* Настройка порога MAX в градусах (device_lib) */
@@ -498,6 +542,21 @@ static void handle_dpt_command(uint8_t h_adr, uint8_t l_adr, uint8_t cmd, const 
     case 14: /* mode (для DPT/LSWITCH) */
         if (len >= 1) {
             dc->mode = payload[0];
+        }
+        break;
+    case 15: /* button_kind (для BUTTON) */
+        if (m->VDtype[slot] == DEVICE_BUTTON_TYPE && len >= 1 && payload[0] <= DeviceButtonKind_FireZone) {
+            bc->button_kind = payload[0];
+        }
+        break;
+    case 16: /* zones[7] (для BUTTON) */
+        if (m->VDtype[slot] == DEVICE_BUTTON_TYPE && len >= 7) {
+            memcpy(bc->zones, payload, 7u);
+        }
+        break;
+    case 17: /* normal_closed (для BUTTON) */
+        if (m->VDtype[slot] == DEVICE_BUTTON_TYPE && len >= 1) {
+            bc->normal_closed = payload[0] ? 1u : 0u;
         }
         break;
     default:

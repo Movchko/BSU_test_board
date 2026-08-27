@@ -6,6 +6,7 @@
  * - MCU_k2 x1 : (h=4,z=1)
  * - MCU_k3 x1 : (h=5,z=2)
  * - MCU_kr x1 : (h=6,z=3)
+ * - MCU_k3 x1 : (h=7,z=3) [button + lswitch + igniter]
  * - PPKY      : h=1
  */
 
@@ -18,11 +19,12 @@
 
 static can_ext_id_t ppky_can_id;
 static uint8_t ppky_status_sec_cnt = 0;
-/* 6 МКУ на шине */
-#define MCU_COUNT 6
-#define IGNITER_COUNT 10
+/* 7 МКУ на шине */
+#define MCU_COUNT 7
+#define IGNITER_COUNT 11
 #define DPT_COUNT 3
-#define LSWITCH_COUNT 2
+#define LSWITCH_COUNT 3
+#define BUTTON_COUNT 1
 #define RELAY_COUNT 2
 
 static can_ext_id_t mcu_can_id[MCU_COUNT];
@@ -33,6 +35,7 @@ static uint32_t igniter_last_tick[IGNITER_COUNT] = {0};
 static uint32_t dpt_last_tick[DPT_COUNT] = {0};
 static uint32_t dpt_state_last_tick[DPT_COUNT] = {0};
 static uint32_t lswitch_last_tick[LSWITCH_COUNT] = {0};
+static uint32_t button_last_tick[BUTTON_COUNT] = {0};
 static uint32_t relay_last_tick[RELAY_COUNT] = {0};
 #define PPKY_INTERVAL_MS    1000
 #define MCU_INTERVAL_MS     1000
@@ -98,17 +101,20 @@ static const McuMap_t mcu_map[MCU_COUNT] = {
     {3u, 3u, DEVICE_MCU_K1},
     {1u, 4u, DEVICE_MCU_K2},
     {2u, 5u, DEVICE_MCU_K3},
-    {3u, 6u, DEVICE_MCU_KR}
+    {3u, 6u, DEVICE_MCU_KR},
+    {3u, 7u, DEVICE_MCU_K3}
 };
 
 static IgniterState_t vdev_igniter[IGNITER_COUNT];
 static DPTState_t vdev_dpt[DPT_COUNT];
 static LSwitchState_t vdev_lswitch[LSWITCH_COUNT];
+static DPTState_t vdev_button[BUTTON_COUNT];
 static RelayState_t vdev_relay[RELAY_COUNT];
 
 static can_ext_id_t igniter_id[IGNITER_COUNT];
 static can_ext_id_t dpt_id[DPT_COUNT];
 static can_ext_id_t lswitch_id[LSWITCH_COUNT];
+static can_ext_id_t button_id[BUTTON_COUNT];
 static can_ext_id_t relay_id[RELAY_COUNT];
 /* online_mode:
  * 1 - все устройства онлайн
@@ -120,6 +126,7 @@ static uint8_t mcu_active[MCU_COUNT] = {0};
 static uint8_t igniter_used_count = 0u;
 static uint8_t dpt_used_count = 0u;
 static uint8_t lswitch_used_count = 0u;
+static uint8_t button_used_count = 0u;
 static uint8_t relay_used_count = 0u;
 
 static volatile uint32_t emulator_pause_until = 0;
@@ -353,6 +360,25 @@ static void send_lswitch_status(uint8_t lsw_idx)
     BSU_Protocol_SendCan(id.ID, data, 8);
 }
 
+static void send_button_status(uint8_t btn_idx)
+{
+    uint8_t data[8];
+    can_ext_id_t id = button_id[btn_idx];
+    id.field.dir = 1;
+
+    /* Для BUTTON используется DPT-совместимый формат. */
+    data[0] = 0;
+    data[1] = vdev_button[btn_idx].line_state;
+    data[2] = (uint8_t)(vdev_button[btn_idx].measured_resistance_ohm & 0xFFu);
+    data[3] = (uint8_t)((vdev_button[btn_idx].measured_resistance_ohm >> 8) & 0xFFu);
+    data[4] = (uint8_t)vdev_button[btn_idx].max_temp_c;
+    data[5] = vdev_button[btn_idx].max_fault;
+    data[6] = (uint8_t)vdev_button[btn_idx].max_internal_temp_c;
+    data[7] = 0;
+
+    BSU_Protocol_SendCan(id.ID, data, 8);
+}
+
 static void send_relay_status(uint8_t relay_idx)
 {
     uint8_t data[8];
@@ -450,6 +476,7 @@ void BSU_Emulator_ApplyConfig(const uint8_t *cfg_data, uint32_t cfg_size)
     uint8_t ign_idx = 0u;
     uint8_t dpt_idx = 0u;
     uint8_t lsw_idx = 0u;
+    uint8_t btn_idx = 0u;
     uint8_t rel_idx = 0u;
     const PPKYCfg *cfg = NULL;
 
@@ -462,6 +489,7 @@ void BSU_Emulator_ApplyConfig(const uint8_t *cfg_data, uint32_t cfg_size)
     memset(igniter_id, 0, sizeof(igniter_id));
     memset(dpt_id, 0, sizeof(dpt_id));
     memset(lswitch_id, 0, sizeof(lswitch_id));
+    memset(button_id, 0, sizeof(button_id));
     memset(relay_id, 0, sizeof(relay_id));
 
     for (i = 0u; i < MCU_COUNT; i++) {
@@ -506,6 +534,13 @@ void BSU_Emulator_ApplyConfig(const uint8_t *cfg_data, uint32_t cfg_size)
                 lswitch_id[lsw_idx].field.l_adr = l_adr;
                 lswitch_id[lsw_idx].field.d_type = DEVICE_LSWITCH_TYPE;
                 lsw_idx++;
+            } else if (vdtype == DEVICE_BUTTON_TYPE && btn_idx < BUTTON_COUNT) {
+                button_id[btn_idx].field.dir = 0;
+                button_id[btn_idx].field.zone = zone;
+                button_id[btn_idx].field.h_adr = h_adr;
+                button_id[btn_idx].field.l_adr = l_adr;
+                button_id[btn_idx].field.d_type = DEVICE_BUTTON_TYPE;
+                btn_idx++;
             } else if (vdtype == DEVICE_RELAY_TYPE && rel_idx < RELAY_COUNT) {
                 relay_id[rel_idx].field.dir = 0;
                 relay_id[rel_idx].field.zone = zone;
@@ -520,6 +555,7 @@ void BSU_Emulator_ApplyConfig(const uint8_t *cfg_data, uint32_t cfg_size)
     igniter_used_count = ign_idx;
     dpt_used_count = dpt_idx;
     lswitch_used_count = lsw_idx;
+    button_used_count = btn_idx;
     relay_used_count = rel_idx;
 }
 
@@ -529,6 +565,7 @@ void BSU_Emulator_Init(void)
     uint8_t ign_idx = 0;
     uint8_t dpt_idx = 0;
     uint8_t lsw_idx = 0;
+    uint8_t btn_idx = 0;
     uint8_t rel_idx = 0;
 
     build_ppky_id();
@@ -547,6 +584,9 @@ void BSU_Emulator_Init(void)
     for (i = 0; i < LSWITCH_COUNT; i++) {
         lswitch_last_tick[i] = HAL_GetTick();
     }
+    for (i = 0; i < BUTTON_COUNT; i++) {
+        button_last_tick[i] = HAL_GetTick();
+    }
     for (i = 0; i < RELAY_COUNT; i++) {
         relay_last_tick[i] = HAL_GetTick();
     }
@@ -554,6 +594,7 @@ void BSU_Emulator_Init(void)
     memset(vdev_igniter, 0, sizeof(vdev_igniter));
     memset(vdev_dpt, 0, sizeof(vdev_dpt));
     memset(vdev_lswitch, 0, sizeof(vdev_lswitch));
+    memset(vdev_button, 0, sizeof(vdev_button));
     memset(vdev_relay, 0, sizeof(vdev_relay));
 
     for (i = 0; i < DPT_COUNT; i++) {
@@ -569,6 +610,13 @@ void BSU_Emulator_Init(void)
         vdev_lswitch[i].max_temp_c = 25;
         vdev_lswitch[i].max_fault = 0;
         vdev_lswitch[i].max_internal_temp_c = 24;
+    }
+    for (i = 0; i < BUTTON_COUNT; i++) {
+        vdev_button[i].line_state = 0;
+        vdev_button[i].measured_resistance_ohm = 3000;
+        vdev_button[i].max_temp_c = 25;
+        vdev_button[i].max_fault = 0;
+        vdev_button[i].max_internal_temp_c = 24;
     }
     for (i = 0; i < RELAY_COUNT; i++) {
         vdev_relay[i].desired_state = 0;
@@ -644,21 +692,40 @@ void BSU_Emulator_Init(void)
                 ign_idx++;
             }
         } else if (mcu_map[i].d_type == DEVICE_MCU_K3) {
-            if (lsw_idx < LSWITCH_COUNT) {
-                lswitch_id[lsw_idx].field.dir = 0;
-                lswitch_id[lsw_idx].field.zone = mcu_map[i].zone;
-                lswitch_id[lsw_idx].field.h_adr = mcu_map[i].h_adr;
-                lswitch_id[lsw_idx].field.l_adr = 1;
-                lswitch_id[lsw_idx].field.d_type = DEVICE_LSWITCH_TYPE;
-                lsw_idx++;
-            }
-            if (lsw_idx < LSWITCH_COUNT) {
-                lswitch_id[lsw_idx].field.dir = 0;
-                lswitch_id[lsw_idx].field.zone = mcu_map[i].zone;
-                lswitch_id[lsw_idx].field.h_adr = mcu_map[i].h_adr;
-                lswitch_id[lsw_idx].field.l_adr = 2;
-                lswitch_id[lsw_idx].field.d_type = DEVICE_LSWITCH_TYPE;
-                lsw_idx++;
+            if (mcu_map[i].h_adr == 7u) {
+                if (btn_idx < BUTTON_COUNT) {
+                    button_id[btn_idx].field.dir = 0;
+                    button_id[btn_idx].field.zone = mcu_map[i].zone;
+                    button_id[btn_idx].field.h_adr = mcu_map[i].h_adr;
+                    button_id[btn_idx].field.l_adr = 1;
+                    button_id[btn_idx].field.d_type = DEVICE_BUTTON_TYPE;
+                    btn_idx++;
+                }
+                if (lsw_idx < LSWITCH_COUNT) {
+                    lswitch_id[lsw_idx].field.dir = 0;
+                    lswitch_id[lsw_idx].field.zone = mcu_map[i].zone;
+                    lswitch_id[lsw_idx].field.h_adr = mcu_map[i].h_adr;
+                    lswitch_id[lsw_idx].field.l_adr = 2;
+                    lswitch_id[lsw_idx].field.d_type = DEVICE_LSWITCH_TYPE;
+                    lsw_idx++;
+                }
+            } else {
+                if (lsw_idx < LSWITCH_COUNT) {
+                    lswitch_id[lsw_idx].field.dir = 0;
+                    lswitch_id[lsw_idx].field.zone = mcu_map[i].zone;
+                    lswitch_id[lsw_idx].field.h_adr = mcu_map[i].h_adr;
+                    lswitch_id[lsw_idx].field.l_adr = 1;
+                    lswitch_id[lsw_idx].field.d_type = DEVICE_LSWITCH_TYPE;
+                    lsw_idx++;
+                }
+                if (lsw_idx < LSWITCH_COUNT) {
+                    lswitch_id[lsw_idx].field.dir = 0;
+                    lswitch_id[lsw_idx].field.zone = mcu_map[i].zone;
+                    lswitch_id[lsw_idx].field.h_adr = mcu_map[i].h_adr;
+                    lswitch_id[lsw_idx].field.l_adr = 2;
+                    lswitch_id[lsw_idx].field.d_type = DEVICE_LSWITCH_TYPE;
+                    lsw_idx++;
+                }
             }
             if (ign_idx < IGNITER_COUNT) {
                 igniter_id[ign_idx].field.dir = 0;
@@ -690,6 +757,7 @@ void BSU_Emulator_Init(void)
     igniter_used_count = IGNITER_COUNT;
     dpt_used_count = DPT_COUNT;
     lswitch_used_count = LSWITCH_COUNT;
+    button_used_count = BUTTON_COUNT;
     relay_used_count = RELAY_COUNT;
 }
 
@@ -754,6 +822,14 @@ void BSU_Emulator_Process(void)
             (now - lswitch_last_tick[i] >= LSWITCH_INTERVAL_MS)) {
             lswitch_last_tick[i] = now;
             send_lswitch_status(i);
+        }
+    }
+
+    for (uint8_t i = 0; i < button_used_count; i++) {
+        if (vdev_is_online_for_hadr(button_id[i].field.h_adr) &&
+            (now - button_last_tick[i] >= DPT_INTERVAL_MS)) {
+            button_last_tick[i] = now;
+            send_button_status(i);
         }
     }
 
